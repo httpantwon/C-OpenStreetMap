@@ -1,21 +1,25 @@
-/*dist.h*/
+#pragma once
 
+struct Coordinates {
+  double lat;
+  double lon;
+
+  Coordinates() : Coordinates(0, 0) {
+  }
+
+  Coordinates(double lat, double lon) : lat(lat), lon(lon) {
+  }
+};
+
+// Returns the distance in miles between 2 points (lat1, long1) and
+// (lat2, long2).  Latitudes are positive above the equator and
+// negative below; longitudes are positive heading east of Greenwich
+// and negative heading west.  Example: Chicago is (41.88, -87.63).
 //
-// Adam T Koehler, PhD
-// University of Illinois Chicago
-// CS 251, Fall 2023
-//
-// Project Original Variartion By:
-// Joe Hummel, PhD
-// University of Illinois at Chicago
-//
+// NOTE: you may get slightly different results depending on which
+// (lat, long) pair is passed as the first parameter.
+double distBetween2Points(Coordinates p1, Coordinates p2);
 
-#include <cmath>
-#include <iostream>
-
-#include "osm.h"
-
-using namespace std;
-
-double distBetween2Points(double lat1, double long1, double lat2, double long2);
-Coordinates centerBetween2Points(double lat1, double long1, double lat2, double long2);
+// Returns the center Coordinate between (lat1, lon1) and (lat2, lon2)
+// Reference: http://www.movable-type.co.uk/scripts/latlong.html
+Coordinates centerBetween2Points(Coordinates p1, Coordinates p2);

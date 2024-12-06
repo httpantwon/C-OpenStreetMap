@@ -1,42 +1,73 @@
-VALGRIND = valgrind --leak-check=full --track-origins=yes
-CXXFLAGS = -O2 -Wall -I. -g -std=c++2a
-WARNING = :
+CXX = clang++
+# Unused: warn, but annoying to block compilation on
+# Sign compare: noisy
+# Command line arg: noisy, not relevant to students
+CXXFLAGS = \
+	-Wall -Wextra -Werror \
+	-Wno-error=unused-function \
+	-Wno-error=unused-parameter \
+	-Wno-error=unused-variable \
+	-Wno-error=unused-but-set-variable \
+	-Wno-error=unused-value \
+	-Wno-sign-compare \
+	-Wno-unused-command-line-argument \
+	-std=c++2a -I. -O2 -g -fno-omit-frame-pointer \
+	-fsanitize=address,undefined
 
+# Add include path for nlohmann json
+CXXFLAGS += -I/opt/homebrew/include
+
+ENV_VARS = ASAN_OPTIONS=detect_leaks=1 LSAN_OPTIONS=suppressions=suppr.txt:print_suppressions=false
+
+# On Ubuntu and WSL, googletest is installed to /usr/include or
+# /usr/local/include, which are used by default.
+
+# On Mac, we need to manually include them in our path. Brew installs to
+# different locations on Intel/Silicon, so ask brew where things live.
 UNAME := $(shell uname)
 ifeq ($(UNAME), Darwin)
-	WARNING = echo '\033[0;31mValgrind is not supported on MacOS. Make sure to run your tests in zyBooks to check for memory safety and leaks. See the Project 3 guide for more info.\033[0m';
-	VALGRIND =
-	CXXFLAGS += -I/opt/homebrew/Cellar/googletest/1.14.0/include -L/opt/homebrew/Cellar/googletest/1.14.0/lib
+	GTEST_PREFIX := $(shell brew --prefix googletest)
+	LLVM_PREFIX := $(shell brew --prefix llvm)
+	CXX := $(LLVM_PREFIX)/bin/clang++
+	CXXFLAGS += -I$(GTEST_PREFIX)/include
+	CXXFLAGS += -L$(GTEST_PREFIX)/lib
 endif
 
-osm_tests: application.cpp dist.cpp osm.cpp tinyxml2.cpp tests.cpp graph.h tests/graph_tests.h tests/buildgraph_tests.h tests/dijkstra_tests.h
-	g++ $(CXXFLAGS) application.cpp dist.cpp osm.cpp tinyxml2.cpp tests.cpp -lgtest -lgtest_main -lpthread -o osm_tests
+build/%.o: tests/%.cpp graph.h
+	mkdir -p build && $(CXX) $(CXXFLAGS) -c $< -o $@
+
+build/%.o: %.cpp graph.h
+	mkdir -p build && $(CXX) $(CXXFLAGS) -c $< -o $@
+
+TEST_NAMES := $(basename $(notdir $(wildcard tests/*.cpp)))
+TEST_OBJS := $(addprefix build/,$(addsuffix .o,$(TEST_NAMES)))
+SOURCES := $(filter-out main,$(basename $(wildcard *.cpp)))
+SOURCE_OBJS := $(addprefix build/,$(addsuffix .o,$(SOURCES)))
+
+osm_tests: $(TEST_OBJS) $(SOURCE_OBJS)
+	$(CXX) $(CXXFLAGS) $^ -lgtest -lgmock -lgtest_main -o $@
 
 test_graph: osm_tests
-	@$(WARNING)
-	$(VALGRIND) ./osm_tests --gtest_filter="Graph.*" --gtest_color=yes
+	$(ENV_VARS) ./$< --gtest_color=yes --gtest_filter="Graph*"
 
-test_buildgraph: osm_tests
-	@$(WARNING)
-	$(VALGRIND) ./osm_tests --gtest_filter="BuildGraph.*" --gtest_color=yes
+test_build_graph: osm_tests
+	$(ENV_VARS) ./$< --gtest_color=yes --gtest_filter="BuildGraph*"
 
 test_dijkstra: osm_tests
-	@$(WARNING)
-	$(VALGRIND) ./osm_tests --gtest_filter="Dijkstra.*" --gtest_color=yes
+	$(ENV_VARS) ./$< --gtest_color=yes --gtest_filter="Dijkstra*"
 
 test_all: osm_tests
-	@$(WARNING)
-	$(VALGRIND) ./osm_tests --gtest_color=yes
+	$(ENV_VARS) ./$< --gtest_color=yes
 
-osm_main: application.cpp dist.cpp osm.cpp tinyxml2.cpp main.cpp graph.h
-	g++ $(CXXFLAGS) application.cpp dist.cpp osm.cpp tinyxml2.cpp main.cpp -o osm_main
+osm_main:  $(SOURCE_OBJS) build/main.o
+	$(CXX) $(CXXFLAGS) $^ -o $@
 
-run_osm_main: osm_main
-	@$(WARNING)
-	$(VALGRIND) ./osm_main
+run_osm: osm_main
+	$(ENV_VARS) ./$<
 
 clean:
-	rm -f osm_tests
-	rm -f osm_main
+	rm -f osm_main osm_tests build/*
+	# MacOS symbol cleanup
+	rm -rf *.dSYM
 
-.PHONY: clean
+.PHONY: clean test_all test_graph test_build_graph test_dijkstra run_osm

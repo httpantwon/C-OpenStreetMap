@@ -1,12 +1,9 @@
 #include "application.h"
 
-#include <cassert>
-#include <cstdlib>
-#include <cstring>
-#include <iomanip> /*setprecision*/
 #include <iostream>
+#include <limits>
 #include <map>
-#include <queue>
+#include <queue>  // priority_queue
 #include <set>
 #include <stack>
 #include <string>
@@ -16,303 +13,299 @@
 
 #include "dist.h"
 #include "graph.h"
-#include "osm.h"
-#include "tinyxml2.h"
+#include "json.hpp"  // Include the JSON library
 
 using namespace std;
-using namespace tinyxml2;
 
-//Can be used for infinity in our code
-double INF = numeric_limits<double>::max(); 
-
-graph<long long, double> buildGraph(
-    const map<long long, Coordinates>& Nodes,
-    const vector<FootwayInfo>& Footways,
-    const vector<BuildingInfo>& Buildings) {
-    graph<long long, double> G;
-    
-    // TODO_STUDENT
-    /*Add nodes to the graph*/
-    for (const auto& node : Nodes) {
-        G.addVertex(node.first);
-    }
-
-    /*Add footway edges*/
-    for (const auto& footway : Footways) { //For each footway
-        /*Retrieves a vector of node IDs from the current Footways
-          object and assigns it to 'nodes', with each ID representing a point
-          along the footway*/
-        const vector<long long>& nodes = footway.Nodes;
-
-        /*For each pair of consecutive nodes in the 'nodes' vector, calculates
-          the distance and add edges accordingly*/
-        for (size_t i = 0; i + 1 < nodes.size(); ++i) {
-            // Get current and next node IDS, and calculates the distance between them 
-            long long from = nodes.at(i); 
-            long long to = nodes.at(i + 1); 
-            double distance = distBetween2Points(Nodes.at(from).Lat, Nodes.at(from).Lon, 
-            Nodes.at(to).Lat, Nodes.at(to).Lon);
-
-            /*Adds bidirectional edges between current and next node with calculated 
-              distance as weight.*/
-            G.addEdge(from, to, distance);
-            G.addEdge(to, from, distance);
-        }
-    }
-
-    /*Add building vertices and edges*/
-    for (const auto& building : Buildings) {
-        // Add building vertex to the graph
-        G.addVertex(building.Coords.ID);
-
-        // Connect building vertex to nearby footway nodes
-        for (const auto& node : Nodes) {
-            // Check if the node is on a footway and within a threshold distance from the building center
-            if (node.second.OnFootway && distBetween2Points(building.Coords.Lat, building.Coords.Lon, node.second.Lat, node.second.Lon) < 0.041) {
-                // Add edges between building vertex and nearby footway nodes
-                G.addEdge(building.Coords.ID, node.first, distBetween2Points(building.Coords.Lat, building.Coords.Lon, node.second.Lat, node.second.Lon));
-                G.addEdge(node.first, building.Coords.ID, distBetween2Points(building.Coords.Lat, building.Coords.Lon, node.second.Lat, node.second.Lon)); // Bidirectional edge
-            }
-        }
-    }
-    return G;
-}
+double INF = numeric_limits<double>::max();
+// template <typename VertexT, typename WeightT>
 
 class prioritize {
-    public:
-    bool operator()(const pair<double, long long>& p1, const pair<double, long long>& p2) const {
-        return p1.first > p2.first; // Compare based on the first element (distance)
+  public:
+  /* For the pairs, long long is Node ID and double is distance to that node*/
+    bool operator()(const pair<long long, double>& p1, const pair<long long, double>& p2) const {
+      return p1.second > p2.second; // Returns true or false
     }
 };
 
-vector<long long> dijkstra(
-    const graph<long long, double>& G,
-    long long start,
-    long long target,
-    const set<long long>& ignoreNodes) {
-    vector<long long> path; //Vector to sore the shortest path
+void buildGraph(istream& input, graph<long long, double>& g,
+                vector<BuildingInfo>& buildings) {
+  
+  nlohmann::json jsonData;
+  input >> jsonData; // Reads input stream into the json object
 
-    /*Initializes data structures for Dijkstra's algorithm. Priority 
-      queue to store vertices with their respective distances*/
-    priority_queue<pair<double, long long>, vector<pair<double, long long> >, prioritize> worklist;
+  // Step 1: Parse the input JSON data into usable structure
+  for (const auto& buildingJson: jsonData["buildings"]) {
+    BuildingInfo building;
+    
+    // Extract individual building details from the JSON object
+    building.id = buildingJson["id"];
+    building.location = Coordinates{buildingJson["lat"], buildingJson["lon"]};
+    building.abbr = buildingJson["abbr"];
+    building.name = buildingJson["name"];
+    buildings.push_back(building); // Store the building info in the vector
 
-    /*Maps distances from the start vertex to each vertex, and tracks
-      previous vertices in the shortest path*/
-    unordered_map<long long, double> distances;
-    unordered_map<long long, long long> previous;
-    set<long long> visited;
+    // Create VertexT object for the building and add it to the graph
+    g.addVertex(building.id); // Add the building as a vertex
+  }
 
-    /*Special case when the shortest past from the start vertex
-      to the target vertex is just itself*/
+  /* Step 2: Extract building information from the JSON data and add to the graph.
+     1. Iterates through the 'buildings' key in each JSON file and pushes back each
+     building detail in the buildings vector 
+     2. Adds each building as a vertex to the graph */
+  unordered_map<long long, Coordinates> waypointCoords;  
+  for (const auto& waypointJson : jsonData["waypoints"]) {
+    long long waypointId = waypointJson["id"];
+    g.addVertex(waypointId);
+    waypointCoords[waypointId] = Coordinates{waypointJson["lat"], waypointJson["lon"]};
+  }
+
+  // Step 3: Create edges for footways between buildings/waypoints
+  for (const auto& footwayJson : jsonData["footways"]) {
+    /* Iterate through each footway's list of waypoint IDs. I did 'i + 1' to
+       make sure that there is always a next element in the footwayJson array */
+    for (int i = 0; i + 1 < footwayJson.size(); i++) {
+      long long startId = footwayJson[i];  // Starting vertex ID
+      long long endId = footwayJson[i + 1]; // Ending vertex ID
+
+      /* Before adding edges, I check to make sure sure that both waypoints 
+         exist in the stored coordinates */
+      if (waypointCoords.find(startId) != waypointCoords.end() &&
+        waypointCoords.find(endId) != waypointCoords.end()) {
+        double distance = distBetween2Points(waypointCoords[startId], waypointCoords[endId]);
+        
+        // Add bidirectional edges to the graph
+        g.addEdge(startId, endId, distance);
+        g.addEdge(endId, startId, distance);
+      }
+    }
+  }
+  
+  // Step 4: Add edges between buildings and nearby waypoints
+  // Loop through all buildings and add edges to nearby waypoints within 0.036 miles
+  const double maxDistance = 0.036; // 0.036 miles threshold
+  for (const auto& building : buildings) {
+    for (const auto& waypoint : waypointCoords) {
+      double distance = distBetween2Points(building.location, waypoint.second);
+      if (distance <= maxDistance) {
+        g.addEdge(building.id, waypoint.first, distance);
+        g.addEdge(waypoint.first, building.id, distance); // Add bidirectional edge
+      }
+    }
+  }
+}
+
+BuildingInfo getBuildingInfo(const vector<BuildingInfo>& buildings,
+                             const string& query) {
+  for (const BuildingInfo& building : buildings) {
+    if (building.abbr == query) {
+      return building;
+    } else if (building.name.find(query) != string::npos) {
+      return building;
+    }
+  }
+
+  BuildingInfo fail;
+  fail.id = -1;
+  return fail;
+}
+
+BuildingInfo getClosestBuilding(const vector<BuildingInfo>& buildings,
+                                Coordinates c) {
+  double minDestDist = INF;
+  BuildingInfo ret = buildings.at(0);
+  for (const BuildingInfo& building : buildings) {
+    double dist = distBetween2Points(building.location, c);
+    if (dist < minDestDist) {
+      minDestDist = dist;
+      ret = building;
+    }
+  }
+  return ret;
+}
+
+vector<long long> dijkstra(const graph<long long, double>& G, long long start,
+                           long long target,
+                           const set<long long>& ignoreNodes) {
+  /* Notes from TA: The 5 data structures that will be used:
+     1. a priority_queue 'worklist' 
+     2. an unorderedset called 'seen', which is a set of all of the nodes previously visited.
+     3. predecessors, nodes that are already worked on, in the form of a map
+     4. a vector to store the shortest paths
+     5. a vector 'distances'
+  
+     While worklist is not empty, pop the top element off of the worklist, get the 
+     current distance to the current node, then populate seen(), then loop through
+     all of the neighbors in my graph, and in that loop, i will be using the current
+     node's distance to its neighbor. After i go through my while loop, populate paths
+     vector based on the predecessors map */
+  /* 1. Priority queue containing a pair, a vector of pairs, and an object with an 
+        overloaded operator that is supposed to dictate which element comes before another.
+     2. The queue should order pairs based on the second value, from smallest to largest */
+    priority_queue<pair<double, long long>, vector<pair<double, long long>>, prioritize> worklist;
+    
+    unordered_map<long long, double> distances; // Change from long long to double
+    unordered_map<long long, long long> predecessors; // To track the path
+    unordered_set<long long> seen;
+    vector<long long> paths; //Vector to sore the shortest path
+  
     if (start == target) {
         return {start};
     }
-
-    /*Initialize distances for each vertex in the graph 'G' to infinity.
-      Loops over each vertex in the set returned by getter*/
-    for (long long vertex : G.getVertices()) {
-          distances[vertex] = INF;
-    }
-
-    distances[start] = 0; //Sets distance to start the vertex to 0
-    worklist.push(make_pair(0, start)); //Push the start vertex to the priority queue
     
-    /*Initializes 'current' to 'target', which is the destination vertex for
-      which we want to find the shortest path back to the 'start' vertex*/
-    long long current = target;
-
-    while (!worklist.empty()) {
-        // Process the vertex currently being considered
-        // The priority queue stores vertices with their respective distances
-        // Access .second to get the vertex and .at(current) to get the distance  
-        current = worklist.top().second; 
-        double distance = distances.at(current);
-
-        worklist.pop();  // Pops the vertex with the smallest distance
-        
-        // Reconstruct the shortest path if the current vertex is the target
-        if(current == target) { 
-            // Traverse backward from the target to the start vertex to reconstruct the path
-            while (current != start) {
-                /*appends the 'current' to 'path'. Because I am traversing backward from 
-                'target' to 'start',  I must record each vertex along the path*/
-                path.push_back(current);
-
-                /*updates 'current' to previous vertex, going back one each step at a time*/
-                current = previous[current]; 
-            }
-
-            path.push_back(start); //Append the start vertex to complete the path
-            reverse(path.begin(), path.end()); // Reverse the path to get the correct order
-            return path;
-        }
-
-        if (visited.count(current)) continue;
-        visited.insert(current);
-
-        // Update distances of neighbors
-        for (long long neighbor : G.neighbors(current)) {
-            // Skip ignored nodes
-            if (ignoreNodes.count(neighbor) && neighbor != target) continue;
-            
-            /*1. Get the weight of the edge between the current vertex and its neighbor
-              2. Checks if the edge exists*/
-            double weight = 0.0;
-            double edgeExists = G.getWeight(current, neighbor, weight);
-            if (!edgeExists) continue; // Skip if there is no edge between the nodes
-            
-            /*Updates distance and previous vertex if the sum of the current distance 
-              and the weight of the edge to the neighbor is less than the previously 
-              recorded distance to the neighbor*/
-            if (distance + weight < distances[neighbor] || distances.count(neighbor) == 0) {
-                distances[neighbor] = distance + weight;
-                previous[neighbor] = current; 
-                worklist.push(make_pair(distances[neighbor], neighbor));
-            }
-        }
+    // Initialize distances to infinity
+    for (long long vertex : G.getVertices()) {
+      distances[vertex] = INF;
     }
-    return path;
+
+  distances[start] = 0.0;
+  worklist.push(make_pair(0, start)); // Add the start vertex with 0 distance
+
+  /*Initializes 'currentNode' to 'target', which is the destination vertex for
+      which we want to find the shortest path back to the 'start' vertex*/
+  long long currentNode = target;
+
+  // Perform Dijkstra's algorithm
+  while (!worklist.empty()) { // While the worklist has work
+    /* The first vertex in pair is the minimum distance vertex, extract it from priority queue.
+       Vertex label is stored in second of pair (it has to be done this way to keep the vertices
+       sorted distance (distance must be first item in pair) */
+    auto [currentDist, currentNode] = worklist.top();
+    worklist.pop();
+
+    // Skip the node if it's already been seen in the worklist
+    if (seen.count(currentNode)) continue;
+    seen.insert(currentNode);
+
+    // If the target is reached, build the path
+    if (currentNode == target) {
+      while (predecessors.count(currentNode)) {
+        paths.push_back(currentNode);
+        currentNode = predecessors[currentNode];
+      }
+      paths.push_back(start);
+      reverse(paths.begin(), paths.end());
+      return paths;
+    }
+
+    for (const auto& neighbor : G.neighbors(currentNode)) {
+      double weight = 0.0;
+      if (seen.count(neighbor)) continue;
+
+      // Get the weight of the edge from currentNode to the neighbor
+      if (G.getWeight(currentNode, neighbor, weight)) {
+        double newDist = currentDist + weight;
+        if (newDist < distances[neighbor]) {
+          distances[neighbor] = newDist;
+          predecessors[neighbor] = currentNode;
+          worklist.push({newDist, neighbor});
+        }
+      }
+    }
+  }
+  return paths; // Return the reconstructed path
 }
 
-double pathLength(const graph<long long, double>& G, const vector<long long>& path) {
-    double length = 0.0;
-    double weight = 0.0;
-    for (size_t i = 0; i + 1 < path.size(); i++) {
-        bool res = G.getWeight(path.at(i), path.at(i + 1), weight);
-        assert(res);
-        length += weight;
+double pathLength(const graph<long long, double>& G,
+                  const vector<long long>& path) {
+  double length = 0.0;
+  double weight;
+  for (size_t i = 0; i + 1 < path.size(); i++) {
+    bool res = G.getWeight(path.at(i), path.at(i + 1), weight);
+    if (!res) {
+      return -1;
     }
-    return length;
+    length += weight;
+  }
+  return length;
 }
 
 void outputPath(const vector<long long>& path) {
-    for (size_t i = 0; i < path.size(); i++) {
-        cout << path.at(i);
-        if (i != path.size() - 1) {
-            cout << "->";
-        }
+  for (size_t i = 0; i < path.size(); i++) {
+    cout << path.at(i);
+    if (i != path.size() - 1) {
+      cout << "->";
     }
-    cout << endl;
+  }
+  cout << endl;
 }
 
-void application(
-    const vector<BuildingInfo>& Buildings,
-    const graph<long long, double>& G) {
-    string person1Building, person2Building;
+void application(const vector<BuildingInfo>& buildings,
+                 const graph<long long, double>& G) {
+  string person1Building, person2Building;
 
-    set<long long> buildingNodes;
-    for (const auto& building : Buildings) {
-        buildingNodes.insert(building.Coords.ID);
+  set<long long> buildingNodes;
+  for (const auto& building : buildings) {
+    buildingNodes.insert(building.id);
+  }
+
+  cout << endl;
+  cout << "Enter person 1's building (partial name or abbreviation), or #> ";
+  getline(cin, person1Building);
+
+  while (person1Building != "#") {
+    cout << "Enter person 2's building (partial name or abbreviation)> ";
+    getline(cin, person2Building);
+
+    // Look up buildings by query
+    BuildingInfo p1 = getBuildingInfo(buildings, person1Building);
+    BuildingInfo p2 = getBuildingInfo(buildings, person2Building);
+    Coordinates P1Coords, P2Coords;
+    string P1Name, P2Name;
+
+    if (p1.id == -1) {
+      cout << "Person 1's building not found" << endl;
+    } else if (p2.id == -1) {
+      cout << "Person 2's building not found" << endl;
+    } else {
+      cout << endl;
+      cout << "Person 1's point:" << endl;
+      cout << " " << p1.name << endl;
+      cout << " " << p1.id << endl;
+      cout << " (" << p1.location.lat << ", " << p1.location.lon << ")" << endl;
+      cout << "Person 2's point:" << endl;
+      cout << " " << p2.name << endl;
+      cout << " " << p2.id << endl;
+      cout << " (" << p2.location.lon << ", " << p2.location.lon << ")" << endl;
+
+      Coordinates centerCoords = centerBetween2Points(p1.location, p2.location);
+      BuildingInfo dest = getClosestBuilding(buildings, centerCoords);
+
+      cout << "Destination Building:" << endl;
+      cout << " " << dest.name << endl;
+      cout << " " << dest.id << endl;
+      cout << " (" << dest.location.lat << ", " << dest.location.lon << ")"
+           << endl;
+
+      vector<long long> P1Path = dijkstra(G, p1.id, dest.id, buildingNodes);
+      vector<long long> P2Path = dijkstra(G, p2.id, dest.id, buildingNodes);
+
+      // This should NEVER happen with how the graph is built
+      if (P1Path.empty() || P2Path.empty()) {
+        cout << endl;
+        cout << "At least one person was unable to reach the destination "
+                "building. Is an edge missing?"
+             << endl;
+        cout << endl;
+      } else {
+        cout << endl;
+        cout << "Person 1's distance to dest: " << pathLength(G, P1Path);
+        cout << " miles" << endl;
+        cout << "Path: ";
+        outputPath(P1Path);
+        cout << endl;
+        cout << "Person 2's distance to dest: " << pathLength(G, P2Path);
+        cout << " miles" << endl;
+        cout << "Path: ";
+        outputPath(P2Path);
+      }
     }
 
+    //
+    // another navigation?
+    //
     cout << endl;
     cout << "Enter person 1's building (partial name or abbreviation), or #> ";
     getline(cin, person1Building);
-
-    while (person1Building != "#") {
-        cout << "Enter person 2's building (partial name or abbreviation)> ";
-        getline(cin, person2Building);
-
-        //
-        // find the building coordinates
-        //
-        bool foundP1 = false;
-        bool foundP2 = false;
-        Coordinates P1Coords, P2Coords;
-        string P1Name, P2Name;
-
-        for (const BuildingInfo& building : Buildings) {
-            if (building.Abbrev == person1Building) {
-                foundP1 = true;
-                P1Name = building.Fullname;
-                P1Coords = building.Coords;
-            }
-            if (building.Abbrev == person2Building) {
-                foundP2 = true;
-                P2Name = building.Fullname;
-                P2Coords = building.Coords;
-            }
-        }
-
-        for (const BuildingInfo& building : Buildings) {
-            if (!foundP1 &&
-                building.Fullname.find(person1Building) != string::npos) {
-                foundP1 = true;
-                P1Name = building.Fullname;
-                P1Coords = building.Coords;
-            }
-            if (!foundP2 && building.Fullname.find(person2Building) != string::npos) {
-                foundP2 = true;
-                P2Name = building.Fullname;
-                P2Coords = building.Coords;
-            }
-        }
-
-        if (!foundP1) {
-            cout << "Person 1's building not found" << endl;
-        } else if (!foundP2) {
-            cout << "Person 2's building not found" << endl;
-        } else {
-            cout << endl;
-            cout << "Person 1's point:" << endl;
-            cout << " " << P1Name << endl << " " << P1Coords.ID << endl;
-            cout << " (" << P1Coords.Lat << ", " << P1Coords.Lon << ")" << endl;
-            cout << "Person 2's point:" << endl;
-            cout << " " << P2Name << endl << " " << P2Coords.ID << endl;
-            cout << " (" << P2Coords.Lat << ", " << P2Coords.Lon << ")" << endl;
-
-            string destName = "";
-            Coordinates destCoords;
-
-            Coordinates centerCoords = centerBetween2Points(
-                P1Coords.Lat, P1Coords.Lon, P2Coords.Lat, P2Coords.Lon);
-
-            double minDestDist = numeric_limits<double>::max();
-
-            for (const BuildingInfo& building : Buildings) {
-                double dist = distBetween2Points(
-                    centerCoords.Lat, centerCoords.Lon,
-                    building.Coords.Lat, building.Coords.Lon);
-                if (dist < minDestDist) {
-                    minDestDist = dist;
-                    destCoords = building.Coords;
-                    destName = building.Fullname;
-                } 
-            }
-
-            cout << "Destination Building:" << endl;
-            cout << " " << destName << endl;
-            cout << " " << destCoords.ID << endl; 
-            cout << " (" << destCoords.Lat << ", " << destCoords.Lon << ")" << endl;
-            
-            //Problems also start here
-            vector<long long> P1Path = dijkstra(G, P1Coords.ID, destCoords.ID, buildingNodes);
-            vector<long long> P2Path = dijkstra(G, P2Coords.ID, destCoords.ID, buildingNodes);
-            
-            // This should NEVER happen with how the graph is built
-            if (P1Path.empty() || P2Path.empty()) {
-                cout << endl;
-                cout << "At least one person was unable to reach the destination building. Is an edge missing?" << endl;
-                cout << endl;
-            } else {
-                cout << endl;
-                cout << "Person 1's distance to dest: " << pathLength(G, P1Path);
-                cout << " miles" << endl;
-                cout << "Path: ";
-                outputPath(P1Path);
-                cout << endl;
-                cout << "Person 2's distance to dest: " << pathLength(G, P2Path);
-                cout << " miles" << endl;
-                cout << "Path: ";
-                outputPath(P2Path);
-            }
-        }
-
-        //
-        // another navigation?
-        //
-        cout << endl;
-        cout << "Enter person 1's building (partial name or abbreviation), or #> ";
-        getline(cin, person1Building);
-    }
+  }
 }
